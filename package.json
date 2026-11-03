@@ -1,0 +1,17 @@
+{
+  "name": "chorezilla",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Family timetable, daily check-ins, and a weekly crown. Node server and SQLite.",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "test": "node --experimental-sqlite --test",
+    "stamp": "node scripts/stamp-assets.js",
+    "start": "node --experimental-sqlite server/index.js",
+    "backup": "node --experimental-sqlite server/backup.js"
+  }
+}
