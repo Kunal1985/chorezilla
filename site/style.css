@@ -227,6 +227,7 @@ h1 { font-size: 1.8rem; margin: 8px 0 4px; }
 .templates { margin-top: 0; }
 .chip { border-radius: 999px; }
 
+a.btn { text-decoration: none; color: inherit; }
 .btn {
   display: inline-flex;
   align-items: center;
@@ -293,6 +294,7 @@ h1 { font-size: 1.8rem; margin: 8px 0 4px; }
 
 .codeblock { display: flex; gap: 8px; align-items: center; }
 .codeblock input { flex: 1; letter-spacing: 0.18em; font-size: 1.3rem; text-align: center; }
+.profile.on { outline: 3px solid var(--orange); }
 .profile {
   width: 100%;
   display: flex;

@@ -2,17 +2,44 @@
 
 A family timetable. Parents build the week, everyone checks in each day, and the weekly crown goes to whoever followed the routine. Missed time is shown as minutes and as the points that got away.
 
-The site is static HTML, CSS, and JavaScript in `site/`, deployed to GitHub Pages. Shared households use Supabase (magic-link auth, Postgres, row level security) from the browser with the public anon key. Until that is filled in, the site opens on a sample family stored in the browser.
+The real app is a small Node server. It serves `site/` and a JSON API, and it keeps every household in one SQLite file. GitHub Pages can still publish `site/` as a **demo only**: the sample family stays in that browser and is not shared.
 
-Expected site: <https://kunal1985.github.io/chorezilla/>
+## Run locally
+
+Requires Node 22.13+.
+
+```bash
+npm test
+npm start
+```
+
+Open <http://localhost:8080/>. `npm start` creates `data/chorezilla.sqlite` in the current directory. Set `DATA_DIR` to put the file somewhere else:
+
+```bash
+DATA_DIR=/var/lib/chorezilla npm start
+```
+
+`PORT` defaults to 8080. `HOST` defaults to `0.0.0.0`.
+
+## Sign in
+
+A parent creates the household and chooses a password (at least 8 characters). That password belongs to the parent who created the house.
+
+Everyone else joins with the invite code, picks their name (or claims a name a parent already added), and chooses a 4-digit PIN. Coming back is the same code, the same name, and the PIN. The creating parent signs in with the household password.
+
+Passwords and PINs are stored with scrypt. The session is an httpOnly cookie. Eight wrong tries on a name lock that login for 15 minutes.
+
+The server writes the points. A check-in from the browser cannot choose its own total. After a parent approves or overrides a row, the kid cannot change it. Each request is limited to the signed-in household.
 
 ## Demo
 
-Open `site/index.html` through a local server, or open the Pages URL before Supabase is configured. You land in **The Roar House** with Alex (parent), Mia, and Leo. Use **See it as** to switch between the kid view and the parent view. Taps stay in `localStorage` on that device. **House → Reset sample family** puts the original week back.
+On a server, **Play the sample family** opens The Roar House (Alex, Mia, and Leo) in this browser only. **House → Reset sample family** puts the original week back.
+
+The GitHub Pages workflow still deploys `site/` when those files change. That URL has no database, so it goes straight to the sample family. Shared check-ins need the Node server.
 
 ## Scoring
 
-A routine has a length and a point value. The same rule is in `site/scoring.js` (what the page shows) and in `supabase/migrations/001_init.sql` (what gets stored, so a browser cannot invent a total).
+A routine has a length and a point value. `site/scoring.js` is what the page shows. `server/store.js` uses the same module when it saves a check-in.
 
 | Mark | Points | Time counted as wasted |
 | --- | --- | --- |
@@ -21,75 +48,63 @@ A routine has a length and a point value. The same rule is in `site/scoring.js` 
 | Missed | Nothing | The whole slot |
 | Still open | Not scored | Not wasted |
 
-Half of 5 is 3. Half of 15 is 8. Half of 1 is 1. A miss of a 30 minute, 15 point routine is the line the kids see: "You lost 30 minutes = 15 points."
+Half of 5 is 3. Half of 15 is 8. A miss of a 30 minute, 15 point routine reads "You lost 30 minutes = 15 points."
 
-Today's routines stay open until the end time, so a morning check-in still counts before the clock runs out. After the end time, an unmarked routine counts as missed. Days before the routine was added are ignored. Archiving stops new misses; check-ins already saved stay on the board.
+Today's routines stay open until the end time. After that, an unmarked routine counts as missed. Days before the routine was added are ignored. The crown is the most points from Monday through Sunday on the device clock. A tie breaks to fewer wasted minutes, then the longer streak. A streak day means every routine was Done.
 
-The crown is the most points that week (Monday through Sunday, on the device's clock). A tie breaks to fewer wasted minutes, then the longer streak. Nobody wears it until someone has points. Two people with the same points, waste, and streak share it.
+## The database file
 
-A streak day means every routine that day was Done. Half or missed breaks it. Today does not break it while routines are still open and nothing was missed or half. A day with no routines is skipped.
+The file is `$DATA_DIR/chorezilla.sqlite` (`./data` if `DATA_DIR` is unset). SQLite is a file. If the disk disappears, the households disappear.
 
-Parents set the week's prize. Kids mark their own routines. Points count immediately. A parent can agree with **Looks right**, or override the mark. After a parent has checked a row, the kid cannot change it.
+Copy it while the app is running:
+
+```bash
+DATA_DIR=/var/lib/chorezilla npm run backup
+```
+
+That writes `backups/chorezilla-<timestamp>.sqlite` inside the data directory (or pass a path: `npm run backup -- /safe/place/chorezilla.sqlite`). Parents can also use **House → Download household data**, which is a JSON copy of their own house, not the whole database.
+
+Put the server behind HTTPS. Fly.io and Render set `x-forwarded-proto`, and the session cookie is then marked Secure. For a plain local HTTP server, leave that unset.
+
+## Hosting
+
+The process is one Node server and one file. Anything that gives that file a disk which survives restarts will work.
+
+| Place | Does the file survive a redeploy? |
+| --- | --- |
+| Your own PC, a Raspberry Pi, or a small VPS with a normal disk | Yes, if `DATA_DIR` is on that disk |
+| Docker with a volume mounted at `/data` | Yes |
+| [Fly.io](https://fly.io) with a [volume](https://fly.io/docs/volumes/) mounted at `/data` | Yes. A Fly machine without a volume loses the file |
+| Render **paid** disk, or any host with a persistent disk mounted at `DATA_DIR` | Yes |
+| Render free web service, Railway free, Fly without a volume, or any other ephemeral disk | No. Redeploy or restart gives you an empty database |
+
+Example with Docker on a machine you control:
+
+```bash
+docker build -t chorezilla .
+docker run -d --name chorezilla -p 8080:8080 -v chorezilla-data:/data chorezilla
+```
+
+On Fly, create a volume, set `DATA_DIR=/data`, and mount the volume there before the first real household. Back up the file (`npm run backup`, or `fly ssh sftp get`) before you destroy a volume.
+
+Node 22 still marks `node:sqlite` experimental, so the start command passes `--experimental-sqlite`. The schema is `server/schema.sql`.
+
+## Tests
+
+```bash
+npm test
+```
+
+That covers scoring, the crown, the sample week, the API (passwords, PINs, points the client cannot override, parent locks, and households staying apart), and the backup copy.
 
 ## Layout
 
 ```text
-site/                         GitHub Pages (relative URLs, works under /chorezilla/)
-  index.html, app.js, style.css
-  scoring.js                  points, streaks, crown
-  demo.js                     sample family
-  config.js                   Supabase URL and anon key (empty = demo)
-supabase/migrations/001_init.sql
-lib/scoring.js                re-exports site/scoring.js for tests
-test/                         node:test
-.github/workflows/pages.yml   deploys site/ on pushes that touch it
+server/index.js          HTTP, cookies, static files
+server/store.js          households, check-ins, points
+server/schema.sql        SQLite tables
+server/db.js             open the file and migrate
+server/backup.js         copy the database
+site/                    the pages the server (and GitHub Pages) serve
+lib/scoring.js           same rules the server saves
 ```
-
-Days on a routine are ISO: 1 is Monday, 7 is Sunday. A routine stays inside one day (bedtime is the window for getting to bed, not the hours asleep).
-
-## Local
-
-Requires Node 22+.
-
-```bash
-npm test
-npm start
-```
-
-`npm start` serves `site/` at <http://localhost:8080/>. Tests cover scoring, the crown, the sample week, and that the migration enables row level security.
-
-## Supabase
-
-1. Create a project at <https://supabase.com/dashboard>.
-2. Open **SQL Editor** and run `supabase/migrations/001_init.sql` once.
-3. **Authentication → Providers**: Email is enough. Magic link is the login.
-4. **Authentication → URL configuration**
-   - Site URL: `https://kunal1985.github.io/chorezilla/`
-   - Redirect URLs: that same URL, plus `http://localhost:8080/` and `http://127.0.0.1:8080/` if you sign in locally.
-5. **Project Settings → API**. Copy the project URL and the `anon` public key into `site/config.js`:
-
-```js
-window.CHOREZILLA_CONFIG = {
-  supabaseUrl: "https://YOUR_PROJECT.supabase.co",
-  supabaseAnonKey: "YOUR_ANON_KEY"
-};
-```
-
-`site/config.example.js` is the same shape. The anon key is meant for the browser. Do not put the service role key in this repo or in `config.js`. Row level security is what keeps one family from reading another. The invite code is the household key: anyone who has it can join, including as a parent, so only share it with the family. Parents can mint a new code from **House**.
-
-Push the config change. The Pages workflow deploys `site/` when files there change.
-
-First parent: sign in, **Create a family**, then add kid profiles (they do not need a login for a parent to mark their day). A kid with their own email signs in, enters the code, and claims their name. A second parent can join with the code as a parent.
-
-The timetable uses the clock and timezone of the phone or laptop that has the page open. A household should be in one timezone.
-
-## GitHub Pages
-
-After this is on `main`:
-
-1. **Settings → Pages → Build and deployment → Source: GitHub Actions.** The URL is <https://kunal1985.github.io/chorezilla/>.
-2. If the `github-pages` environment asks for approval, approve the deployment from the default branch.
-
-The workflow is `.github/workflows/pages.yml`. It runs on pushes to `main` that change `site/` or the workflow, and from **Actions → Pages → Run workflow**. It stamps asset URLs with the commit SHA, then deploys the `site/` folder. Token permissions on that job are `contents: read`, `pages: write`, and `id-token: write`.
-
-Demo mode is what visitors get until `site/config.js` has a real URL and anon key.

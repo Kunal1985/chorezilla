@@ -3,14 +3,15 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 
-test('the migration keeps each family inside row level security', () => {
-  const sql = fs.readFileSync(path.join(__dirname, '..', 'supabase/migrations/001_init.sql'), 'utf8');
-  for (const table of ['families', 'members', 'slots', 'checkins', 'prizes']) {
-    assert.match(sql, new RegExp('alter table public\\.' + table + ' enable row level security'));
+test('the sqlite schema stores households, sessions, and check-in points', () => {
+  const sql = fs.readFileSync(path.join(__dirname, '..', 'server/schema.sql'), 'utf8');
+  for (const table of ['families', 'members', 'slots', 'checkins', 'prizes', 'sessions']) {
+    assert.match(sql, new RegExp('CREATE TABLE IF NOT EXISTS ' + table));
   }
-  assert.match(sql, /apply_checkin_score/);
-  assert.match(sql, /round\(pts \* 0\.5\)::int/);
-  assert.match(sql, /unclaimed_profiles/);
-  assert.match(sql, /revoke all on public\.families/);
+  assert.match(sql, /password_hash/);
+  assert.match(sql, /pin_hash/);
+  assert.match(sql, /points_awarded/);
+  assert.match(sql, /UNIQUE \(slot_id, day\)/);
+  assert.doesNotMatch(sql, /supabase/i);
   assert.doesNotMatch(sql, /service_role/);
 });

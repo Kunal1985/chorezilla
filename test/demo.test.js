@@ -17,7 +17,7 @@ function picture(clock) {
   return { state, occ };
 }
 
-test('the sample house is ready before Supabase is configured', () => {
+test('the sample house works with no server', () => {
   const { state, occ } = picture(CLOCK);
   assert.equal(state.family.name, 'The Roar House');
   assert.equal(state.members.length, 3);

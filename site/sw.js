@@ -7,7 +7,6 @@ const SHELL = [
   'app.js?v=' + V,
   'scoring.js?v=' + V,
   'demo.js?v=' + V,
-  'config.js?v=' + V,
   'manifest.json',
   'icon.svg'
 ];
@@ -28,6 +27,7 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
   if (event.request.method !== 'GET') return;
   event.respondWith(
     fetch(event.request).then(response => {

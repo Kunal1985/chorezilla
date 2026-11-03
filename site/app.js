@@ -34,25 +34,14 @@
     viewWeek: null,
     editor: null,
     join: null,
-    sessionEmail: '',
-    sessionUserId: null,
+    api: false,
+    loginMember: null,
+    claimId: null,
     error: ''
   };
 
-  let sb = null;
   let toastTimer = 0;
   let renderedScreen = '';
-
-  function configured() {
-    const cfg = window.CHOREZILLA_CONFIG || {};
-    const url = String(cfg.supabaseUrl || '').trim();
-    const key = String(cfg.supabaseAnonKey || '').trim();
-    if (!url || !key) return false;
-    const local = /^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(url);
-    if (!/^https:\/\//.test(url) && !local) return false;
-    if (/YOUR_|example\.supabase/i.test(url + key)) return false;
-    return true;
-  }
 
   function esc(value) {
     return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -260,101 +249,56 @@
     }
   }
 
-  function loadSdk() {
-    if (window.supabase && window.supabase.createClient) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js';
-      script.onload = () => resolve();
-      script.onerror = () => reject(new Error('Could not load the Supabase library'));
-      document.head.appendChild(script);
+  async function api(path, options) {
+    const opts = options || {};
+    const res = await fetch(path, {
+      method: opts.method || 'GET',
+      credentials: 'same-origin',
+      headers: opts.body ? { 'content-type': 'application/json' } : undefined,
+      body: opts.body ? JSON.stringify(opts.body) : undefined
     });
+    const text = await res.text();
+    let data = null;
+    if (text) {
+      try { data = JSON.parse(text); } catch (err) { data = { error: text }; }
+    }
+    if (!res.ok) {
+      const error = new Error((data && data.error) || 'Something went wrong');
+      error.status = res.status;
+      throw error;
+    }
+    return data;
   }
 
-  function redirectUrl() {
-    const url = new URL(window.location.href);
-    url.hash = '';
-    url.search = '';
-    return url.href;
-  }
-
-  async function loadLive(userId) {
-    state.sessionUserId = userId;
-    const memberRes = await sb.from('members').select('*').eq('user_id', userId).limit(1);
-    if (memberRes.error) throw memberRes.error;
-    const member = memberRes.data && memberRes.data[0];
+  function applyState(data) {
     state.mode = 'live';
-    if (!member) {
-      state.meId = null;
-      state.family = null;
-      state.members = [];
-      state.screen = 'onboard';
-      return;
-    }
-    const fid = member.family_id;
-    const since = CZ.addDays(CZ.clockFromDate(new Date()).date, -120);
-    const [familyRes, membersRes, slotsRes, checkinsRes, prizesRes] = await Promise.all([
-      sb.from('families').select('*').eq('id', fid).limit(1),
-      sb.from('members').select('*').eq('family_id', fid).order('created_at'),
-      sb.from('slots').select('*').eq('family_id', fid),
-      sb.from('checkins').select('*').eq('family_id', fid).gte('day', since),
-      sb.from('prizes').select('*').eq('family_id', fid)
-    ]);
-    for (const res of [familyRes, membersRes, slotsRes, checkinsRes, prizesRes]) {
-      if (res.error) throw res.error;
-    }
-    state.family = familyRes.data[0];
-    state.members = membersRes.data || [];
-    state.slots = (slotsRes.data || []).map(normalizeSlot);
-    state.checkins = (checkinsRes.data || []).map(normalizeCheckin);
-    state.prizes = (prizesRes.data || []).map(row => Object.assign({}, row, { week_start: String(row.week_start).slice(0, 10) }));
-    state.meId = member.id;
-    if (state.screen === 'auth' || state.screen === 'onboard') state.screen = 'today';
+    state.family = data.family;
+    state.members = data.members || [];
+    state.slots = (data.slots || []).map(normalizeSlot);
+    state.checkins = (data.checkins || []).map(normalizeCheckin);
+    state.prizes = (data.prizes || []).map(row => Object.assign({}, row, {
+      week_start: String(row.week_start).slice(0, 10)
+    }));
+    state.meId = data.me.id;
   }
 
-  async function bootLive() {
-    await loadSdk();
-    const cfg = window.CHOREZILLA_CONFIG;
-    sb = window.supabase.createClient(cfg.supabaseUrl.trim(), cfg.supabaseAnonKey.trim(), {
-      auth: {
-        flowType: 'pkce',
-        detectSessionInUrl: true,
-        persistSession: true,
-        autoRefreshToken: true
-      }
-    });
-    const { data, error } = await sb.auth.getSession();
-    if (error) throw error;
-    if (data.session) {
-      state.sessionEmail = data.session.user.email || '';
-      await loadLive(data.session.user.id);
-    } else {
-      state.screen = 'auth';
-    }
-    sb.auth.onAuthStateChange((event, session) => {
-      if (state.booting) return;
-      if (event === 'SIGNED_OUT') {
-        showAuthScreen();
-        return;
-      }
-      if (event === 'SIGNED_IN' && session) {
-        if (state.mode === 'live' && state.sessionUserId === session.user.id && state.family) return;
-        state.sessionEmail = session.user.email || '';
-        loadLive(session.user.id).then(() => {
-          if (state.family) goto('today');
-          else render();
-        }).catch(err => { fail(err); render(); });
-      }
-    });
+  async function refresh() {
+    applyState(await api('/api/state'));
   }
 
   function showAuthScreen() {
     state.screen = 'auth';
-    state.authPanel = 'email';
+    state.authPanel = 'home';
+    state.mode = 'demo';
     state.family = null;
     state.members = [];
+    state.slots = [];
+    state.checkins = [];
+    state.prizes = [];
     state.meId = null;
     state.join = null;
+    state.loginMember = null;
+    state.claimId = null;
     if (location.hash) history.replaceState(null, '', location.pathname + location.search);
     render();
   }
@@ -416,24 +360,7 @@
         } else state.checkins.push(row);
         persist();
       } else {
-        const payload = {
-          family_id: state.family.id,
-          slot_id: slot.id,
-          member_id: slot.member_id,
-          day,
-          status,
-          points_possible: slot.points,
-          points_awarded: CZ.pointsFor(status, slot.points),
-          duration_minutes: duration,
-          reported_role: self.role,
-          approved: self.role === 'parent'
-        };
-        const { data, error } = await sb.from('checkins').upsert(payload, { onConflict: 'slot_id,day' }).select().single();
-        if (error) throw error;
-        const saved = normalizeCheckin(data);
-        const index = state.checkins.findIndex(item => item.slot_id === saved.slot_id && item.day === saved.day);
-        if (index >= 0) state.checkins[index] = saved;
-        else state.checkins.push(saved);
+        applyState(await api('/api/checkins', { method: 'POST', body: { slotId, day, status } }));
       }
       toast(message.text, message.tone);
     });
@@ -447,11 +374,7 @@
         if (row) row.approved = true;
         persist();
       } else {
-        const { data, error } = await sb.from('checkins').update({ approved: true }).eq('id', id).select().single();
-        if (error) throw error;
-        const saved = normalizeCheckin(data);
-        const index = state.checkins.findIndex(item => item.id === saved.id);
-        if (index >= 0) state.checkins[index] = saved;
+        applyState(await api('/api/checkins/' + encodeURIComponent(id) + '/approve', { method: 'POST' }));
       }
       toast('Checked. The points stay.', 'good');
     });
@@ -503,29 +426,28 @@
         }
         persist();
       } else if (editor.id) {
-        const { data, error } = await sb.from('slots').update({
-          title: parsed.title,
-          days: parsed.days,
-          start_time: parsed.start,
-          end_time: parsed.end,
-          points: parsed.points
-        }).eq('id', editor.id).select().single();
-        if (error) throw error;
-        const index = state.slots.findIndex(item => item.id === editor.id);
-        state.slots[index] = normalizeSlot(data);
+        applyState(await api('/api/slots/' + encodeURIComponent(editor.id), {
+          method: 'PATCH',
+          body: {
+            title: parsed.title,
+            days: parsed.days,
+            start_time: parsed.start,
+            end_time: parsed.end,
+            points: parsed.points
+          }
+        }));
       } else {
-        const { data, error } = await sb.from('slots').insert({
-          family_id: state.family.id,
-          member_id: editor.member_id,
-          title: parsed.title,
-          days: parsed.days,
-          start_time: parsed.start,
-          end_time: parsed.end,
-          points: parsed.points,
-          active: true
-        }).select().single();
-        if (error) throw error;
-        state.slots.push(normalizeSlot(data));
+        applyState(await api('/api/slots', {
+          method: 'POST',
+          body: {
+            member_id: editor.member_id,
+            title: parsed.title,
+            days: parsed.days,
+            start_time: parsed.start,
+            end_time: parsed.end,
+            points: parsed.points
+          }
+        }));
       }
       state.editor = null;
       toast('Routine saved.', 'good');
@@ -539,10 +461,7 @@
         if (row) row.active = active;
         persist();
       } else {
-        const { data, error } = await sb.from('slots').update({ active }).eq('id', id).select().single();
-        if (error) throw error;
-        const index = state.slots.findIndex(item => item.id === id);
-        state.slots[index] = normalizeSlot(data);
+        applyState(await api('/api/slots/' + encodeURIComponent(id), { method: 'PATCH', body: { active } }));
       }
       toast(active ? 'Routine is back.' : 'Routine archived.', 'good');
     });
@@ -559,16 +478,7 @@
         else state.prizes.push(row);
         persist();
       } else {
-        const { data, error } = await sb.from('prizes').upsert({
-          family_id: state.family.id,
-          week_start: monday,
-          prize
-        }, { onConflict: 'family_id,week_start' }).select().single();
-        if (error) throw error;
-        const saved = Object.assign({}, data, { week_start: String(data.week_start).slice(0, 10) });
-        const index = state.prizes.findIndex(item => item.week_start === saved.week_start);
-        if (index >= 0) state.prizes[index] = saved;
-        else state.prizes.push(saved);
+        applyState(await api('/api/prizes', { method: 'PUT', body: { weekStart: monday, prize } }));
       }
       toast('Prize saved. Make it something they want.', 'good');
     });
@@ -582,9 +492,7 @@
         state.family = Object.assign({}, state.family, { name });
         persist();
       } else {
-        const { data, error } = await sb.from('families').update({ name }).eq('id', state.family.id).select().single();
-        if (error) throw error;
-        state.family = data;
+        applyState(await api('/api/family', { method: 'PATCH', body: { name } }));
       }
       toast('Name saved.', 'good');
     });
@@ -610,15 +518,7 @@
         });
         persist();
       } else {
-        const { data, error } = await sb.from('members').insert({
-          family_id: state.family.id,
-          display_name: name,
-          role,
-          emoji,
-          color
-        }).select().single();
-        if (error) throw error;
-        state.members.push(data);
+        applyState(await api('/api/members', { method: 'POST', body: { displayName: name, role, emoji } }));
       }
       form.reset();
       toast(name + ' is in the house.', 'good');
@@ -638,10 +538,7 @@
         if (member) member.role = role;
         persist();
       } else {
-        const { data, error } = await sb.from('members').update({ role }).eq('id', id).select().single();
-        if (error) throw error;
-        const index = state.members.findIndex(item => item.id === id);
-        state.members[index] = data;
+        applyState(await api('/api/members/' + encodeURIComponent(id), { method: 'PATCH', body: { role } }));
       }
     });
   }
@@ -662,9 +559,7 @@
         state.checkins = state.checkins.filter(item => !slotIds.has(item.slot_id));
         persist();
       } else {
-        const { error } = await sb.from('members').delete().eq('id', id);
-        if (error) throw error;
-        await loadLive(state.sessionUserId);
+        applyState(await api('/api/members/' + encodeURIComponent(id), { method: 'DELETE' }));
       }
       if (state.selectedId === id) state.selectedId = null;
       toast(member.display_name + ' left the board.', 'mid');
@@ -678,9 +573,7 @@
         state.family = Object.assign({}, state.family, { invite_code: uid().slice(0, 6).toUpperCase() });
         persist();
       } else {
-        const { data, error } = await sb.rpc('regenerate_invite');
-        if (error) throw error;
-        state.family = Object.assign({}, state.family, { invite_code: data });
+        applyState(await api('/api/invite', { method: 'POST' }));
       }
       toast('New invite code ready.', 'good');
     });
@@ -800,7 +693,7 @@
     const cards = mine.length ? mine.map(occ => cardHtml(occ)).join('') :
       '<div class="empty">' + mascot() + '<h2>Nothing on this day</h2><p>No routines for ' + esc(member ? member.display_name : 'them') + '.</p>' +
       (isParent() ? '<button type="button" class="btn primary" data-act="nav" data-screen="week">Build the week</button>' : '') + '</div>';
-    const banner = state.mode === 'demo' && configured()
+    const banner = state.mode === 'demo' && state.api
       ? '<p class="banner">This is the sample house. <button type="button" data-act="show-auth">Sign in</button></p>'
       : '';
     return banner + '<h1>' + esc(member ? member.display_name : '') + '\'s day</h1><p class="sub">' +
@@ -984,7 +877,7 @@
         : '<span class="role">' + (member.role === 'parent' ? 'Parent' : 'Kid') + '</span>';
       return '<article class="card"><div class="who"><span class="av" style="--c:' + esc(member.color) + '">' + esc(member.emoji) +
         '</span><div><h3>' + esc(member.display_name) + (member.id === self.id ? ' · you' : '') + '</h3><p class="sub">' +
-        (member.user_id ? 'Signed in' : 'No login yet') + '</p></div></div>' + roleControl +
+        loginLabel(member) + '</p></div></div>' + roleControl +
         (canDelete ? '<button type="button" class="btn tiny danger" data-act="delete-member" data-id="' + esc(member.id) + '">Remove</button>' : '') +
         '</article>';
     }).join('');
@@ -992,7 +885,8 @@
       ? '<h2>Invite</h2><p class="sub">Anyone with this code can join, including as a parent. Share it only with your household.</p>' +
         '<div class="codeblock"><input readonly value="' + esc(state.family.invite_code) + '" aria-label="Invite code">' +
         '<button type="button" class="btn" data-act="copy-code">Copy</button></div>' +
-        '<div class="actions"><button type="button" class="btn ghost" data-act="regen">New code</button></div>' +
+        '<div class="actions"><button type="button" class="btn ghost" data-act="regen">New code</button>' +
+        (state.mode === 'live' ? '<a class="btn" href="/api/export">Download household data</a>' : '') + '</div>' +
         '<h2>Add someone</h2><form data-form="member"><label class="field">Name<input name="name" maxlength="40" required></label>' +
         '<div class="seg"><label><input type="radio" name="role" value="kid" checked>Kid</label><label><input type="radio" name="role" value="parent">Parent</label></div>' +
         emojiPicker('🦊') + '<button class="btn primary" type="submit">Add to the family</button></form>'
@@ -1001,10 +895,17 @@
       ? '<form data-form="rename" class="field">Family name<input name="name" maxlength="80" value="' + esc(state.family.name) + '"><button class="btn" type="submit">Save name</button></form>'
       : '';
     const session = state.mode === 'live'
-      ? '<p class="sub">Signed in as ' + esc(state.sessionEmail) + '</p><button type="button" class="btn" data-act="sign-out">Sign out</button>'
+      ? '<p class="sub">Signed in as ' + esc(self ? self.display_name : '') + '</p><button type="button" class="btn" data-act="sign-out">Sign out</button>'
       : '<button type="button" class="btn danger" data-act="reset-demo">Reset sample family</button>' +
-        (configured() ? '<button type="button" class="btn" data-act="show-auth">Sign in</button>' : '');
+        (state.api ? '<button type="button" class="btn" data-act="show-auth">Sign in</button>' : '');
     return '<h1>House</h1>' + rename + invite + '<h2>People</h2>' + people + '<div class="actions">' + session + '</div>';
+  }
+
+  function loginLabel(member) {
+    if (state.mode !== 'live') return member.user_id ? 'Sample profile' : 'No login yet';
+    if (member.is_owner) return 'Parent password';
+    if (member.has_pin) return 'PIN set';
+    return 'No PIN yet';
   }
 
   function emojiPicker(selected) {
@@ -1014,15 +915,9 @@
   }
 
   function authHtml() {
-    let body = '';
-    if (state.authPanel === 'sent') {
-      body = '<h2>Check your email</h2><p>Open the roar link on this device. It signs you in and brings you back here.</p>' +
-        '<button type="button" class="btn" data-act="auth-email">Use a different email</button>';
-    } else {
-      body = '<h2>Sign in</h2><p>Parents and kids each use their own email. We send a link. No password.</p>' +
-        '<form data-form="email"><label class="field">Email<input type="email" name="email" required autocomplete="email"></label>' +
-        '<button class="btn primary full" type="submit">Email me a link</button></form>';
-    }
+    let body = homeAuthHtml();
+    if (state.authPanel === 'create') body = createAuthHtml();
+    else if (state.authPanel === 'join') body = joinAuthHtml();
     if (state.error) body += '<p class="hint">' + esc(state.error) + '</p>';
     return '<header class="hero"><div class="hero-inner"><div class="brand">' + mascot() +
       '<div><p class="word">CHORE<b>ZILLA</b></p><p class="tag">Routines. Points. A crown.</p></div></div></div></header>' +
@@ -1030,33 +925,67 @@
       '<button type="button" class="btn full" data-act="use-demo">Play the sample family</button></div></div>';
   }
 
-  function onboardHtml() {
-    let panel = '<h2>Start a house</h2><p>Create a family, or join one with the invite code.</p>' +
-      '<div class="actions"><button type="button" class="btn primary" data-act="show-create">Create a family</button>' +
-      '<button type="button" class="btn" data-act="show-join">I have a code</button></div>';
-    if (state.authPanel === 'create') {
-      panel = '<h2>Create a family</h2><form data-form="create"><label class="field">Family name<input name="family" maxlength="80" required placeholder="The Roar House"></label>' +
-        '<label class="field">Your name<input name="name" maxlength="40" required></label>' +
-        emojiPicker('🦖') + '<button class="btn primary full" type="submit">Create and be the parent</button></form>';
-    } else if (state.authPanel === 'join') {
-      const found = state.join ? '<h3>' + esc(state.join.family_name) + '</h3>' +
-        (state.join.profiles.length ? state.join.profiles.map(profile =>
-          '<button type="button" class="profile" data-act="claim" data-id="' + esc(profile.member_id) + '"><span class="av">' +
-          esc(profile.emoji) + '</span><span><b>' + esc(profile.display_name) + '</b><small class="sub">' +
-          esc(profile.role) + '</small></span></button>'
-        ).join('') : '<p class="sub">No profiles are waiting.</p>') +
-        '<form data-form="join-new"><label class="field">Or add yourself<input name="name" maxlength="40" placeholder="Your name"></label>' +
-        '<div class="seg"><label><input type="radio" name="role" value="kid" checked>Kid</label>' +
-        '<label><input type="radio" name="role" value="parent">Parent</label></div>' +
-        '<button class="btn primary" type="submit">Join as a new person</button></form>' : '';
-      panel = '<h2>Join with a code</h2><form data-form="lookup"><label class="field">Invite code<input name="code" maxlength="12" required autocapitalize="characters"></label>' +
-        '<button class="btn" type="submit">Find the family</button></form>' + found;
+  function homeAuthHtml() {
+    if (!state.api) {
+      return '<h2>Sample family</h2><p>This copy has no server, so the sample house stays on this device.</p>';
     }
-    return '<header class="hero"><div class="hero-inner"><div class="brand">' + mascot() +
-      '<div><p class="word">CHORE<b>ZILLA</b></p><p class="tag">' + esc(state.sessionEmail) + '</p></div></div></div></header>' +
-      '<div class="auth-wrap"><div class="authcard">' + panel +
-      (state.error ? '<p class="hint">' + esc(state.error) + '</p>' : '') +
-      '<button type="button" class="btn ghost" data-act="sign-out">Sign out</button></div></div>';
+    return '<h2>Your household</h2><p>A parent makes the house with a password. Everyone else joins with the invite code, their name, and a 4-digit PIN.</p>' +
+      '<div class="actions"><button type="button" class="btn primary" data-act="show-create">Create a household</button>' +
+      '<button type="button" class="btn" data-act="show-join">I have a code</button></div>';
+  }
+
+  function createAuthHtml() {
+    return '<h2>Create a household</h2><p>You are the parent. The password is yours. Kids get a PIN instead.</p>' +
+      '<form data-form="create"><label class="field">Family name<input name="family" maxlength="80" required placeholder="The Roar House"></label>' +
+      '<label class="field">Your name<input name="name" maxlength="40" required autocomplete="nickname"></label>' +
+      emojiPicker('🦖') +
+      '<label class="field">Password<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>' +
+      '<label class="field">Password again<input name="password2" type="password" minlength="8" required autocomplete="new-password"></label>' +
+      '<button class="btn primary full" type="submit">Create the household</button></form>' +
+      '<button type="button" class="btn ghost" data-act="auth-home">Back</button>';
+  }
+
+  function joinAuthHtml() {
+    if (!state.join) {
+      return '<h2>Join or sign in</h2><form data-form="lookup"><label class="field">Invite code<input name="code" maxlength="12" required autocapitalize="characters" autocomplete="off"></label>' +
+        '<button class="btn primary" type="submit">Find the household</button></form>' +
+        '<button type="button" class="btn ghost" data-act="auth-home">Back</button>';
+    }
+    const members = state.join.members || [];
+    const ready = members.filter(member => member.is_owner || member.has_pin);
+    const waiting = members.filter(member => !member.is_owner && !member.has_pin);
+    const picked = members.find(member => member.id === state.loginMember);
+    const claim = members.find(member => member.id === state.claimId);
+    const readyButtons = ready.map(member =>
+      '<button type="button" class="profile' + (member.id === state.loginMember ? ' on' : '') + '" data-act="pick-login" data-id="' + esc(member.id) + '"><span class="av">' +
+      esc(member.emoji) + '</span><span><b>' + esc(member.display_name) + '</b><small class="sub">' +
+      (member.is_owner ? 'Parent password' : 'PIN') + '</small></span></button>'
+    ).join('');
+    const waitButtons = waiting.map(member =>
+      '<button type="button" class="profile' + (member.id === state.claimId ? ' on' : '') + '" data-act="pick-claim" data-id="' + esc(member.id) + '"><span class="av">' +
+      esc(member.emoji) + '</span><span><b>I\'m ' + esc(member.display_name) + '</b><small class="sub">' + esc(member.role) + '</small></span></button>'
+    ).join('');
+    const sign = picked
+      ? '<form data-form="login"><p class="sub">Signing in as ' + esc(picked.display_name) + '</p><label class="field">' +
+        (picked.is_owner ? 'Household password' : 'PIN') +
+        '<input name="secret" ' + (picked.is_owner
+          ? 'type="password" minlength="8" autocomplete="current-password"'
+          : 'type="text" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" autocomplete="one-time-code"') +
+        ' required></label><button class="btn primary" type="submit">Sign in</button></form>'
+      : '';
+    const claimForm = claim
+      ? '<form data-form="claim"><p class="sub">Set a 4-digit PIN for ' + esc(claim.display_name) + '.</p><label class="field">PIN<input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" required autocomplete="new-password"></label>' +
+        '<button class="btn primary" type="submit">Join as ' + esc(claim.display_name) + '</button></form>'
+      : '';
+    return '<h2>' + esc(state.join.familyName) + '</h2>' +
+      (ready.length ? '<h3>Sign in</h3>' + readyButtons + sign : '') +
+      (waiting.length ? '<h3>First time</h3>' + waitButtons + claimForm : '') +
+      '<h3>New person</h3><form data-form="join-new"><label class="field">Name<input name="name" maxlength="40" required></label>' +
+      '<div class="seg"><label><input type="radio" name="role" value="kid" checked>Kid</label><label><input type="radio" name="role" value="parent">Parent</label></div>' +
+      emojiPicker('🦊') +
+      '<label class="field">PIN<input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" required autocomplete="new-password"></label>' +
+      '<button class="btn primary" type="submit">Join</button></form>' +
+      '<button type="button" class="btn ghost" data-act="auth-home">Back</button>';
   }
 
   function navHtml() {
@@ -1077,8 +1006,7 @@
 
   function view() {
     if (!state.ready) return '<div class="hero"><div class="hero-inner"><p class="boot">Waking Chorezilla…</p></div></div>';
-    if (state.screen === 'auth' || !state.family && state.screen !== 'onboard') return authHtml();
-    if (state.screen === 'onboard') return onboardHtml();
+    if (state.screen === 'auth' || !state.family) return authHtml();
     const model = schedule();
     const body = {
       today: () => todayHtml(model),
@@ -1137,26 +1065,15 @@
     if (kind === 'prize') return savePrize(form, form.dataset.week);
     if (kind === 'rename') return renameFamily(form);
     if (kind === 'member') return addMember(form);
-    if (kind === 'email') {
-      const email = String(new FormData(form).get('email') || '').trim();
-      if (!sb) { toast('Supabase is not configured yet.', 'bad'); return; }
-      await withBusy(async () => {
-        const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: redirectUrl() } });
-        if (error) throw error;
-        state.authPanel = 'sent';
-        state.sessionEmail = email;
-        toast('Link sent.', 'good');
-      });
-      return;
-    }
     if (kind === 'create') {
       const family = String(new FormData(form).get('family') || '').trim();
       const name = String(new FormData(form).get('name') || '').trim();
       const emoji = String(new FormData(form).get('emoji') || '🦖');
+      const password = String(new FormData(form).get('password') || '');
+      const again = String(new FormData(form).get('password2') || '');
+      if (password !== again) { toast('Those passwords do not match.', 'bad'); return; }
       await withBusy(async () => {
-        const { error } = await sb.rpc('create_family', { p_name: family, p_display_name: name, p_emoji: emoji });
-        if (error) throw error;
-        await loadLive(state.sessionUserId);
+        applyState(await api('/api/households', { method: 'POST', body: { name: family, displayName: name, emoji, password } }));
         toast('The house is open.', 'good');
         goto('week');
       });
@@ -1165,30 +1082,43 @@
     if (kind === 'lookup') {
       const code = String(new FormData(form).get('code') || '').trim().toUpperCase();
       await withBusy(async () => {
-        const lookup = await sb.rpc('lookup_invite', { p_code: code });
-        if (lookup.error) throw lookup.error;
-        const row = lookup.data && lookup.data[0];
-        if (!row) throw new Error('Invite code not found');
-        const profiles = await sb.rpc('unclaimed_profiles', { p_code: code });
-        if (profiles.error) throw profiles.error;
-        state.join = { code, family_name: row.family_name, profiles: profiles.data || [] };
+        state.join = await api('/api/lookup', { method: 'POST', body: { code } });
+        state.loginMember = null;
+        state.claimId = null;
         state.authPanel = 'join';
+      });
+      return;
+    }
+    if (kind === 'login') {
+      const secret = String(new FormData(form).get('secret') || '');
+      await withBusy(async () => {
+        applyState(await api('/api/login', {
+          method: 'POST',
+          body: { code: state.join.code, memberId: state.loginMember, secret }
+        }));
+        goto('today');
+      });
+      return;
+    }
+    if (kind === 'claim') {
+      const pin = String(new FormData(form).get('pin') || '').trim();
+      await withBusy(async () => {
+        applyState(await api('/api/join', { method: 'POST', body: { code: state.join.code, claimId: state.claimId, pin } }));
+        goto('today');
       });
       return;
     }
     if (kind === 'join-new') {
       const name = String(new FormData(form).get('name') || '').trim();
       const role = form.role && form.role.value === 'parent' ? 'parent' : 'kid';
+      const emoji = String(new FormData(form).get('emoji') || '🦊');
+      const pin = String(new FormData(form).get('pin') || '').trim();
       if (!name) { toast('Add your name.', 'bad'); return; }
       await withBusy(async () => {
-        const { error } = await sb.rpc('join_family', {
-          p_code: state.join.code,
-          p_display_name: name,
-          p_role: role,
-          p_claim: null
-        });
-        if (error) throw error;
-        await loadLive(state.sessionUserId);
+        applyState(await api('/api/join', {
+          method: 'POST',
+          body: { code: state.join.code, displayName: name, role, emoji, pin }
+        }));
         goto('today');
       });
     }
@@ -1264,11 +1194,22 @@
     }
     if (act === 'show-auth') return showAuthScreen();
     if (act === 'show-create') { state.authPanel = 'create'; state.error = ''; render(); return; }
-    if (act === 'show-join') { state.authPanel = 'join'; state.error = ''; render(); return; }
-    if (act === 'auth-email') { state.authPanel = 'email'; render(); return; }
+    if (act === 'show-join') { state.authPanel = 'join'; state.join = null; state.error = ''; render(); return; }
+    if (act === 'auth-home') { state.authPanel = 'home'; state.error = ''; render(); return; }
+    if (act === 'pick-login') {
+      state.loginMember = btn.dataset.id;
+      state.claimId = null;
+      render();
+      return;
+    }
+    if (act === 'pick-claim') {
+      state.claimId = btn.dataset.id;
+      state.loginMember = null;
+      render();
+      return;
+    }
     if (act === 'sign-out') {
-      if (sb) sb.auth.signOut().catch(fail).then(() => showAuthScreen());
-      else showAuthScreen();
+      api('/api/logout', { method: 'POST' }).catch(() => {}).then(() => showAuthScreen());
       return;
     }
     if (act === 'reset-demo') {
@@ -1278,19 +1219,6 @@
       state.viewWeek = null;
       goto('today');
       return;
-    }
-    if (act === 'claim') {
-      withBusy(async () => {
-        const { error } = await sb.rpc('join_family', {
-          p_code: state.join.code,
-          p_display_name: '',
-          p_role: 'kid',
-          p_claim: btn.dataset.id
-        });
-        if (error) throw error;
-        await loadLive(state.sessionUserId);
-        goto('today');
-      });
     }
   }
 
@@ -1314,13 +1242,23 @@
     bind();
     state.booting = true;
     try {
-      if (configured()) await bootLive();
-      else loadDemo(false);
+      const health = await fetch('/api/health', { credentials: 'same-origin' });
+      if (health.ok) {
+        state.api = true;
+        const meRes = await fetch('/api/state', { credentials: 'same-origin' });
+        if (meRes.status === 401) {
+          state.screen = 'auth';
+          state.authPanel = 'home';
+        } else if (meRes.ok) {
+          applyState(await meRes.json());
+        } else {
+          state.screen = 'auth';
+          state.authPanel = 'home';
+          state.error = 'The server did not answer.';
+        }
+      } else loadDemo(false);
     } catch (err) {
-      state.error = err.message || 'Could not start';
-      state.screen = 'auth';
-      if (!configured()) loadDemo(false);
-      else toast(state.error, 'bad');
+      loadDemo(false);
     }
     state.ready = true;
     if (state.family) {
